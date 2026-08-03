@@ -16,7 +16,6 @@ async function getStakingAddresses() {
 }
 
 async function bitcoinTvl(api) {
-  throw new Error('Change the api used for this')
   const owners = await bitcoinBook.pumpBTC()
   return sumTokens({ api, owners })
 }
@@ -35,7 +34,9 @@ async function otherTvl(api) {
 module.exports.isHeavyProtocol = true;
 module.exports.doublecounted = true;
 
-['bitcoin', 'ethereum', 'bsc', 'mantle', 'base', 'arbitrum', 'bob', 'morph', 'sei'].forEach(chain => {
+// ['bitcoin', 'ethereum', 'bsc', 'mantle', 'base', 'arbitrum', 'bob', 'morph', 'sei'].forEach(chain => {
+// morph rpc are down
+['bitcoin', 'ethereum', 'bsc', 'mantle', 'base', 'arbitrum', 'bob', 'sei'].forEach(chain => {
   if (chain == 'bitcoin') {
     module.exports[chain] = {
       tvl: bitcoinTvl,

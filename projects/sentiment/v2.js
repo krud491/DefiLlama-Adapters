@@ -1,12 +1,22 @@
+const { getConfig } = require("../helper/cache");
+const ADDRESSES = require("../helper/coreAssets.json");
 const sdk = require("@defillama/sdk");
 
-const PONDER_URL = "https://artistic-perfection-production.up.railway.app";
+const PONDER_URL = "https://prism-points.marble.live";
 const PORTFOLIO_LENS_ADDRESS = "0x9700750001dDD7C4542684baC66C64D74fA833c0";
 
 const SUPERPOOLS = [
   {
-    superPool: "0x2831775cb5e64b1d892853893858a261e898fbeb",
-    underlyingAsset: "hyperliquid:0x5555555555555555555555555555555555555555",
+    superPool: "0x2831775cb5e64b1d892853893858a261e898fbeb", // wHYPE superpool
+    underlyingAsset: "hyperliquid:" + ADDRESSES.hyperliquid.WHYPE, // wHYPE
+  },
+  {
+    superPool: "0xe45E7272DA7208C7a137505dFB9491e330BF1a4e", // USDe superpool
+    underlyingAsset: "hyperliquid:" + ADDRESSES.arbitrum.USDe, // USDe
+  },
+  {
+    superPool: "0x34B2B0DE7d288e79bbcfCEe6C2a222dAe25fF88D", // USDT0 superpool
+    underlyingAsset: "hyperliquid:" + ADDRESSES.corn.USDT0, // USDT0
   },
 ];
 
@@ -38,7 +48,7 @@ async function getPoolId(superPoolAddress) {
   return poolConnection.pool.id;
 }
 
-async function getPositionAddresses(poolId) {
+async function getPositionAddresses() {
   let positions = [];
   let afterCursor = null;
   let hasNextPage = true;
@@ -49,14 +59,19 @@ async function getPositionAddresses(poolId) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: `
-          query GetPositions($poolId: BigInt!, $after: String) {
-            positions(limit: 100, after: $after, where: { poolId: $poolId }) {
-              items { id }
-              pageInfo { hasNextPage, endCursor }
+          query GetPositions($after: String) {
+            positions(limit: 999, after: $after) {
+              items {
+                id
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
             }
           }
         `,
-        variables: { poolId, after: afterCursor },
+        variables: { after: afterCursor },
       }),
     });
 
@@ -64,8 +79,8 @@ async function getPositionAddresses(poolId) {
     const items = result.data?.positions?.items || [];
     positions.push(...items.map((i) => i.id));
 
-    hasNextPage = result.data?.positions?.pageInfo?.hasNextPage;
-    afterCursor = result.data?.positions?.pageInfo?.endCursor;
+    hasNextPage = result.data.positions.pageInfo.hasNextPage;
+    afterCursor = result.data.positions.pageInfo.endCursor;
   }
 
   return positions;
@@ -76,35 +91,40 @@ async function tvl(api) {
 
   // Lending TVL
   for (const { superPool, underlyingAsset } of SUPERPOOLS) {
-    const totalAssets = await api.call({
-      target: superPool,
-      abi: "uint256:totalAssets",
+    const poolId = await getPoolId(superPool);
+    const totalBorrows = await api.call({
+      target: POOL_ADDRESS,
+      params: [poolId],
+      abi: "function getTotalBorrows(uint256) view returns (uint256)",
     });
-    sdk.util.sumSingleBalance(balances, underlyingAsset, totalAssets);
+    const totalAssets = await api.call({
+      target: POOL_ADDRESS,
+      params: [poolId],
+      abi: "function getTotalAssets(uint256) view returns (uint256)",
+    });
+    const availableLiquidity = BigInt(totalAssets) - BigInt(totalBorrows);
+    sdk.util.sumSingleBalance(balances, underlyingAsset, availableLiquidity);
   }
 
   // Collateral TVL
-  for (const { superPool } of SUPERPOOLS) {
-    try {
-      const poolId = await getPoolId(superPool);
-      const positions = await getPositionAddresses(poolId);
+  const positions = await getConfig('sentiment/'+api.chain, null, {
+    fetcher: getPositionAddresses,
+  });
 
-      const assetData = await api.multiCall({
-        abi: "function getAssetData(address) view returns ((address asset, uint256 amount, uint256 valueInEth)[])",
-        calls: positions,
-        target: PORTFOLIO_LENS_ADDRESS,
-      });
+  // Batch positions into chunks of 30
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < positions.length; i += BATCH_SIZE) {
+    const positionBatch = positions.slice(i, i + BATCH_SIZE);
 
-      assetData.flat().forEach(({ asset, amount }) => {
-        sdk.util.sumSingleBalance(balances, `hyperliquid:${asset}`, amount);
-      });
-    } catch (error) {
-      console.error(
-        "Error fetching collateral for superPool:",
-        superPool,
-        error
-      );
-    }
+    const assetDataBatch = await api.multiCall({
+      abi: "function getAssetData(address) view returns ((address asset, uint256 amount, uint256 valueInEth)[])",
+      calls: positionBatch,
+      target: PORTFOLIO_LENS_ADDRESS,
+    });
+
+    assetDataBatch.flat().forEach(({ asset, amount }) => {
+      sdk.util.sumSingleBalance(balances, `hyperliquid:${asset}`, amount);
+    });
   }
 
   return balances;
@@ -114,25 +134,20 @@ async function borrowed(api) {
   const balances = {};
 
   for (const { superPool, underlyingAsset } of SUPERPOOLS) {
-    try {
-      const poolId = await getPoolId(superPool);
-      const totalBorrows = await api.call({
-        target: POOL_ADDRESS,
-        params: [poolId],
-        abi: "function getTotalBorrows(uint256) view returns (uint256)",
-      });
-      sdk.util.sumSingleBalance(balances, underlyingAsset, totalBorrows);
-    } catch (error) {
-      console.error("Error fetching borrowed amount:", superPool, error);
-    }
+    const poolId = await getPoolId(superPool);
+    const totalBorrows = await api.call({
+      target: POOL_ADDRESS,
+      params: [poolId],
+      abi: "function getTotalBorrows(uint256) view returns (uint256)",
+    });
+    sdk.util.sumSingleBalance(balances, underlyingAsset, totalBorrows);
   }
 
   return balances;
 }
 
 module.exports = {
-  methodology:
-    "Sums assets held by SuperPool contracts (lending TVL) and collateral held by all Position contracts.",
+  methodology: "Sums assets held by SuperPool contracts (lending TVL) and collateral held by all Position contracts.",
   start: 1014900,
   hyperliquid: { tvl, borrowed },
 };
